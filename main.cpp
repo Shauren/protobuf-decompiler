@@ -1,22 +1,17 @@
 
-#include <google/protobuf/descriptor.h>
+#include "BinaryMetadataExtractor.h"
+#include "FilesystemMetadataExtractor.h"
 #include <google/protobuf/descriptor.pb.h>
 #include <google/protobuf/dynamic_message.h>
-#include <google/protobuf/io/zero_copy_stream_impl.h>
 #include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/wire_format_lite.h>
 #include <boost/filesystem/operations.hpp>
 #include <fstream>
-#include <iostream>
-#include <string>
 #include <unordered_map>
 
-bool ParseFromIstreamWithDescriptorPool(google::protobuf::FileDescriptorProto& proto, std::istream* input)
+bool ParseFromCodedInputStreamWithDescriptorPool(google::protobuf::FileDescriptorProto& proto, google::protobuf::io::CodedInputStream* decoder)
 {
-    google::protobuf::io::IstreamInputStream zero_copy_input(input);
-    google::protobuf::io::CodedInputStream decoder(&zero_copy_input);
-    decoder.SetExtensionRegistry(google::protobuf::DescriptorPool::generated_pool(), google::protobuf::MessageFactory::generated_factory());
-    return proto.ParseFromCodedStream(&decoder) && decoder.ConsumedEntireMessage() && input->eof();
+    decoder->SetExtensionRegistry(google::protobuf::DescriptorPool::generated_pool(), google::protobuf::MessageFactory::generated_factory());
+    return proto.ParseFromCodedStream(decoder) && decoder->ConsumedEntireMessage();
 }
 
 std::unordered_map<std::string, std::pair<google::protobuf::FileDescriptor const*, bool>> fileDescriptorsByName;
@@ -28,12 +23,18 @@ int main(int argc, char* argv[])
     google::protobuf::DescriptorProto().GetMetadata();
 
     // first collect files
-    boost::filesystem::directory_iterator end;
-    std::set<std::string> files;
-    for (boost::filesystem::directory_iterator itr(boost::filesystem::current_path()); itr != end; ++itr)
-        if (boost::filesystem::is_regular_file(itr->status()))
-            if (itr->path().extension().string().find(".protoc") != std::string::npos)
-                files.insert(itr->path().string());
+    std::unique_ptr<MetadataExtractor> extractor;
+    if (argc > 1)
+    {
+        // parse protobuf metadata from binary
+        extractor = std::make_unique<BinaryMetadataExtractor>();
+        extractor->Parse(argv[1]);
+    }
+    else
+    {
+        extractor = std::make_unique<FilesystemMetadataExtractor>();
+        extractor->Parse(boost::filesystem::current_path());
+    }
 
     // its time to hack private members
     google::protobuf::DescriptorPool* pool = google::protobuf::DescriptorPool::internal_generated_pool();
@@ -46,23 +47,22 @@ int main(int argc, char* argv[])
     std::set<std::string> parsed;
     std::list<std::string> parsedSorted;
     // then load everything into descriptor pool
-    for (int i = 0; i < files.size(); ++i)
+    for (size_t i = 0; i < extractor->GetMetadata().size(); ++i)
     {
-        for (std::string const& fileName : files)
+        for (std::unique_ptr<MetadataExtractor::Metadata> const& meta : extractor->GetMetadata())
         {
-            if (parsed.count(fileName))
+            if (parsed.count(meta->GetId()))
                 continue;
 
-            std::ifstream in;
-            in.open(fileName.c_str(), std::ios::binary | std::ios::in);
-            if (!in.good())
+            std::shared_ptr<google::protobuf::io::CodedInputStream> in = meta->CreateCodedInputStream();
+            if (!in)
                 continue;
 
             google::protobuf::FileDescriptorProto fileDescProto;
             bool parseOk = false;
             try
             {
-                parseOk = ParseFromIstreamWithDescriptorPool(fileDescProto, &in);
+                parseOk = ParseFromCodedInputStreamWithDescriptorPool(fileDescProto, in.get());
             }
             catch (...)
             {
@@ -75,8 +75,8 @@ int main(int argc, char* argv[])
                 {
                     if (fileDesc->name() != "google/protobuf/descriptor.proto" && fileDescriptorsByName.count(fileDesc->name()) == 0)
                     {
-                        fileDescriptorsByName[fileDesc->name()] = std::make_pair(fileDesc, false);
-                        google::protobuf::MessageFactory::InternalRegisterGeneratedFile(strdup(fileDesc->name().c_str()), [](std::string const& name)
+                        auto itr = fileDescriptorsByName.emplace(std::piecewise_construct, std::forward_as_tuple(fileDesc->name()), std::forward_as_tuple(fileDesc, false)).first;
+                        google::protobuf::MessageFactory::InternalRegisterGeneratedFile(itr->first.c_str(), [](std::string const& name)
                         {
                             std::pair<google::protobuf::FileDescriptor const*, bool>& p = fileDescriptorsByName[name];
                             if (p.second)
@@ -84,17 +84,17 @@ int main(int argc, char* argv[])
 
                             p.second = true;
                             google::protobuf::FileDescriptor const* desc = p.first;
-                            for (int i = 0; i < desc->message_type_count(); ++i)
-                                google::protobuf::MessageFactory::InternalRegisterGeneratedMessage(desc->message_type(i), dynamicMessageFactory->GetPrototype(desc->message_type(i)));
+                            for (int j = 0; j < desc->message_type_count(); ++j)
+                                google::protobuf::MessageFactory::InternalRegisterGeneratedMessage(desc->message_type(j), dynamicMessageFactory->GetPrototype(desc->message_type(j)));
                         });
                     }
 
-                    for (int i = 0; i < fileDesc->extension_count(); ++i)
+                    for (int j = 0; j < fileDesc->extension_count(); ++j)
                     {
-                        google::protobuf::FieldDescriptor const* extension = fileDesc->extension(i);
+                        google::protobuf::FieldDescriptor const* extension = fileDesc->extension(j);
                         switch (extension->type())
                         {
-                            case google::protobuf::internal::WireFormatLite::TYPE_ENUM:
+                            case google::protobuf::FieldDescriptor::Type::TYPE_ENUM:
                                 google::protobuf::internal::ExtensionSet::RegisterEnumExtension(
                                     google::protobuf::MessageFactory::generated_factory()->GetPrototype(extension->containing_type()),
                                     extension->number(),
@@ -103,8 +103,8 @@ int main(int argc, char* argv[])
                                     extension->is_packed(),
                                     [](int){ return true; });
                                 break;
-                            case google::protobuf::internal::WireFormatLite::TYPE_MESSAGE:
-                            case google::protobuf::internal::WireFormatLite::TYPE_GROUP:
+                            case google::protobuf::FieldDescriptor::Type::TYPE_MESSAGE:
+                            case google::protobuf::FieldDescriptor::Type::TYPE_GROUP:
                                 google::protobuf::internal::ExtensionSet::RegisterMessageExtension(
                                     google::protobuf::MessageFactory::generated_factory()->GetPrototype(extension->containing_type()),
                                     extension->number(),
@@ -124,11 +124,11 @@ int main(int argc, char* argv[])
                         }
                     }
 
-                    parsed.insert(fileName);
+                    parsed.insert(meta->GetId());
                     if (fileDesc->name() != "google/protobuf/descriptor.proto")
-                        parsedSorted.push_back(fileName);
+                        parsedSorted.push_back(meta->GetId());
                     else
-                        parsedSorted.push_front(fileName);
+                        parsedSorted.push_front(meta->GetId());
                 }
             }
         }
@@ -138,13 +138,16 @@ int main(int argc, char* argv[])
     google::protobuf::DescriptorPool* pool2 = new google::protobuf::DescriptorPool();
     for (std::string const& fileName : parsedSorted)
     {
-        std::ifstream in;
-        in.open(fileName.c_str(), std::ios::binary | std::ios::in);
-        if (!in.good())
+        MetadataExtractor::Metadata const* meta = extractor->GetById(fileName);
+        if (!meta)
+            continue;
+
+        std::shared_ptr<google::protobuf::io::CodedInputStream> in = meta->CreateCodedInputStream();
+        if (!in)
             continue;
 
         google::protobuf::FileDescriptorProto fileDescProto;
-        if (ParseFromIstreamWithDescriptorPool(fileDescProto, &in))
+        if (ParseFromCodedInputStreamWithDescriptorPool(fileDescProto, in.get()))
         {
             fileDescProto.mutable_options()->set_optimize_for(google::protobuf::FileOptions_OptimizeMode_SPEED);
             if (google::protobuf::FileDescriptor const* fileDesc = pool2->BuildFile(fileDescProto))
