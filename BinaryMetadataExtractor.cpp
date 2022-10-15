@@ -79,7 +79,7 @@ void BinaryMetadataExtractor::FindMetadata()
         itr += 6;
 
         size_t start = _binary.rfind('\xA', itr);
-        if (start == std::string::npos)
+        if (start == std::string::npos || _binary[start - 1] != '\0')
             continue;
 
         size_t decodedBytes = 0;
