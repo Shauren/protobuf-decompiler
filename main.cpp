@@ -6,6 +6,7 @@
 #include <google/protobuf/io/coded_stream.h>
 #include <boost/filesystem/operations.hpp>
 #include <fstream>
+#include <iostream>
 #include <unordered_map>
 
 bool ParseFromCodedInputStreamWithDescriptorPool(google::protobuf::FileDescriptorProto& proto, google::protobuf::io::CodedInputStream* decoder)
@@ -34,6 +35,12 @@ int main(int argc, char* argv[])
     {
         extractor = std::make_unique<FilesystemMetadataExtractor>();
         extractor->Parse(boost::filesystem::current_path());
+    }
+
+    if (extractor->GetMetadata().empty())
+    {
+        std::cout << "No .proto descriptors found" << std::endl;
+        return 1;
     }
 
     // its time to hack private members
