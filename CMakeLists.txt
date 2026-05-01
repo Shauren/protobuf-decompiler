@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.15)
 project(protobuf_decompiler)
 
 find_package(Protobuf)
@@ -6,7 +6,7 @@ find_package(Protobuf)
 set(Boost_USE_STATIC_LIBS        ON)
 set(Boost_USE_MULTITHREADED      ON)
 set(Boost_USE_STATIC_RUNTIME     OFF)
-find_package(Boost 1.51 REQUIRED filesystem system)
+find_package(Boost 1.69 REQUIRED filesystem)
 
 include_directories(${PROTOBUF_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS})
 
