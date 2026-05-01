@@ -50,15 +50,15 @@ int main(int argc, char* argv[])
     *reinterpret_cast<void**>(pool) = nullptr; // mutex_
     *(reinterpret_cast<void**>(pool) + 1) = nullptr; // fallback_database_
 
-    std::vector<std::pair<google::protobuf::FileDescriptorProto, bool>> descProtos;
-    std::set<std::string> parsed;
+    std::set<std::string> parsedFilenames;
+    std::set<std::string> parsedIds;
     std::list<std::string> parsedSorted;
     // then load everything into descriptor pool
     for (size_t i = 0; i < extractor->GetMetadata().size(); ++i)
     {
         for (std::unique_ptr<MetadataExtractor::Metadata> const& meta : extractor->GetMetadata())
         {
-            if (parsed.count(meta->GetId()))
+            if (parsedIds.count(meta->GetId()))
                 continue;
 
             std::shared_ptr<google::protobuf::io::CodedInputStream> in = meta->CreateCodedInputStream();
@@ -76,24 +76,44 @@ int main(int argc, char* argv[])
                 continue;
             }
 
+            for (std::string const& dependency : fileDescProto.dependency())
+            {
+                parseOk = parsedFilenames.count(dependency);
+                if (!parseOk)
+                    break;
+            }
+
             if (parseOk)
             {
+                if (fileDescProto.name() == "google/protobuf/descriptor.proto")
+                {
+                    parsedFilenames.insert(fileDescProto.name());
+                    continue;
+                }
+
+                fileDescProto.mutable_options()->set_optimize_for(google::protobuf::FileOptions_OptimizeMode_CODE_SIZE);
                 if (google::protobuf::FileDescriptor const* fileDesc = pool->BuildFile(fileDescProto))
                 {
-                    if (fileDesc->name() != "google/protobuf/descriptor.proto" && fileDescriptorsByName.count(fileDesc->name()) == 0)
+                    auto fd = fileDescriptorsByName.try_emplace(fileDesc->name(), fileDesc, false);
+                    if (fd.second)
                     {
-                        auto itr = fileDescriptorsByName.emplace(std::piecewise_construct, std::forward_as_tuple(fileDesc->name()), std::forward_as_tuple(fileDesc, false)).first;
-                        google::protobuf::MessageFactory::InternalRegisterGeneratedFile(itr->first.c_str(), [](std::string const& name)
+                        if (fileDesc->name() != "google/protobuf/descriptor.proto")
                         {
-                            std::pair<google::protobuf::FileDescriptor const*, bool>& p = fileDescriptorsByName[name];
-                            if (p.second)
-                                return;
+                            google::protobuf::MessageFactory::InternalRegisterGeneratedFile(fd.first->first.c_str(), [](std::string const& name)
+                            {
+                                std::pair<google::protobuf::FileDescriptor const*, bool>& p = fileDescriptorsByName[name];
+                                if (p.second)
+                                    return;
 
-                            p.second = true;
-                            google::protobuf::FileDescriptor const* desc = p.first;
-                            for (int j = 0; j < desc->message_type_count(); ++j)
-                                google::protobuf::MessageFactory::InternalRegisterGeneratedMessage(desc->message_type(j), dynamicMessageFactory->GetPrototype(desc->message_type(j)));
-                        });
+                                p.second = true;
+                                google::protobuf::FileDescriptor const* desc = p.first;
+                                for (int j = 0; j < desc->message_type_count(); ++j)
+                                    google::protobuf::MessageFactory::InternalRegisterGeneratedMessage(desc->message_type(j), dynamicMessageFactory->GetPrototype(desc->message_type(j)));
+                            });
+                        }
+                        else
+                            for (int j = 0; j < fileDesc->message_type_count(); ++j)
+                                google::protobuf::MessageFactory::InternalRegisterGeneratedMessage(fileDesc->message_type(j), dynamicMessageFactory->GetPrototype(fileDesc->message_type(j)));
                     }
 
                     for (int j = 0; j < fileDesc->extension_count(); ++j)
@@ -131,40 +151,22 @@ int main(int argc, char* argv[])
                         }
                     }
 
-                    parsed.insert(meta->GetId());
+                    parsedFilenames.insert(fileDesc->name());
+                    parsedIds.insert(meta->GetId());
                     if (fileDesc->name() != "google/protobuf/descriptor.proto")
                         parsedSorted.push_back(meta->GetId());
                     else
                         parsedSorted.push_front(meta->GetId());
+
+                    {
+                        boost::filesystem::path parentPath = boost::filesystem::path(fileDesc->name()).parent_path();
+                        if (!parentPath.empty())
+                            boost::filesystem::create_directories(parentPath);
+                        std::ofstream f(fileDesc->name());
+                        f << fileDesc->DebugString() << std::endl;
+                        f.close();
+                    }
                 }
-            }
-        }
-    }
-
-    // and finally rebuild all protos in a new pool with fully resolved dependencies and extensions
-    google::protobuf::DescriptorPool* pool2 = new google::protobuf::DescriptorPool();
-    for (std::string const& fileName : parsedSorted)
-    {
-        MetadataExtractor::Metadata const* meta = extractor->GetById(fileName);
-        if (!meta)
-            continue;
-
-        std::shared_ptr<google::protobuf::io::CodedInputStream> in = meta->CreateCodedInputStream();
-        if (!in)
-            continue;
-
-        google::protobuf::FileDescriptorProto fileDescProto;
-        if (ParseFromCodedInputStreamWithDescriptorPool(fileDescProto, in.get()))
-        {
-            fileDescProto.mutable_options()->set_optimize_for(google::protobuf::FileOptions_OptimizeMode_SPEED);
-            if (google::protobuf::FileDescriptor const* fileDesc = pool2->BuildFile(fileDescProto))
-            {
-                boost::filesystem::path parentPath = boost::filesystem::path(fileDesc->name()).parent_path();
-                if (!parentPath.empty())
-                    boost::filesystem::create_directories(parentPath);
-                std::ofstream f(fileDesc->name());
-                f << fileDesc->DebugString() << std::endl;
-                f.close();
             }
         }
     }
@@ -172,8 +174,6 @@ int main(int argc, char* argv[])
     // unhack to free memory
     *reinterpret_cast<void**>(pool) = mutex_;
     *(reinterpret_cast<void**>(pool) + 1) = fallback_database_;
-
-    delete pool2;
 
     google::protobuf::ShutdownProtobufLibrary();
 
